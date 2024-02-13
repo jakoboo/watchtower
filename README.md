@@ -1,6 +1,6 @@
 # Watchtower
 
-[![NPM Version](https://badge.fury.io/js/@jakoboo/watchtower.svg)](https://www.npmjs.com/package/@jakoboo/watchtower)
+[![npm version](https://badge.fury.io/js/@jakoboo%2Fwatchtower.svg)](https://badge.fury.io/js/@jakoboo%2Fwatchtower)
 [![NPM Install Size](https://badgen.net/packagephobia/install/@jakoboo/watchtower)](https://packagephobia.com/result?p=@jakoboo/watchtower)
 [![NPM Downloads](https://badgen.net/npm/dm/@jakoboo/watchtower)](https://npmcharts.com/compare/@jakoboo/watchtower?minimal=true)
 [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/jakoboo/watchtower/blob/main/LICENSE)

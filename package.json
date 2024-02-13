@@ -1,6 +1,6 @@
 {
   "name": "@jakoboo/watchtower",
-  "version": "0.0.1",
+  "version": "0.0.0-alpha.0",
   "publishConfig": {
     "access": "public"
   },
@@ -25,7 +25,7 @@
     "node": ">= 0.10.0"
   },
   "scripts": {
-    "lint": "eslint .",
+    "lint": "eslint --fix .",
     "build": "rimraf ./dist ./types && rollup -c",
     "prepare": "husky"
   },
@@ -64,8 +64,8 @@
     "typescript": "^5.3.3"
   },
   "lint-staged": {
-    "*.{js,ts,tsx}": [
-      "eslint --fix"
+    "*.{js,ts}": [
+      "eslint"
     ]
   }
 }
