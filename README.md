@@ -25,23 +25,7 @@ npm install @jakoboo/watchtower
 ## Usage
 ```javascript
 const { Watchtower } = require('@jakoboo/watchtower');
-const watchtower = new Watchtower({
-    // Delay before the shutdown sequence starts.
-    // https://freecontent.manning.com/handling-client-requests-properly-with-kubernetes/
-    shutdownDelay: 1_000, // Default: -1 (disabled).
-    
-    // Max total time before process is killed (if graceful shutdown fails).
-    gracefulShutdownTimeoutPeriod: 30_000, // Default: 30000ms.
-
-    // Timeout period for shutdown handlers.
-    shutdownHandlerTimeoutPeriod: 5_000, // Default: 5000ms.
-
-    // Timeout period for health checks.
-    healthCheckTimeoutPeriod: 500, // Default: 500ms.
-    
-    // Termination signals to listen for. All events emitted by process.on() are supported.
-    signals: ['SIGTERM', 'SIGINT', 'SIGHUP'] // Default: ['SIGTERM', 'SIGINT', 'SIGHUP'].
-});
+const watchtower = new Watchtower();
 
 // Your application's startup code.
 
@@ -55,7 +39,76 @@ watchtower.registerShutdownHandler(async () => {
 });
 
 // Signal watchtower that we are done, and it can become ready whenever queue blocking tasks are resolved.
-watchtower.signalReady();
+watchtower.ready();
+```
+
+### Express.js Graceful Shutdown
+
+Gracefully shutdown of an express server requires us to register a shutdown handler that closes the server and waits for all connections to be closed before resolving the promise.
+For a complete example, see the [express example](./examples/express) directory.
+
+```javascript
+const { createServer } = require('http');
+const { Watchtower } = require('@jakoboo/watchtower');
+const express = require('express');
+const watchtower = new Watchtower();
+
+[...]
+
+// We have to create our own server as express instance doesn't hold a reference to it
+const app = express();
+const expressServer = createServer(app);
+
+// Gracefully shutdown the http server
+watchtower.registerShutdownHandler(async () => {
+    await new Promise((resolve, reject) => {
+        let connectionsTimeout;
+
+        // Close server to stop accepting new connections
+        expressServer.close((err) => {
+            if (err) {
+                // Server was not open when it was closed
+                reject(err);
+            }
+
+            if (connectionsTimeout) {
+                // Clear the timeout if all connections are closed before the timeout
+                clearTimeout(connectionsTimeout);
+            }
+
+            // Server and all connections are closed
+            resolve();
+        });
+
+        expressServer.closeIdleConnections();
+
+        // Close all connections after a timeout
+        connectionsTimeout = setTimeout(() => {
+            expressServer.closeAllConnections();
+        }, 1000).unref();
+    });
+});
+
+[...]
+
+// Signal watchtower that we are done, and it can become ready whenever queue blocking tasks are resolved.
+void watchtower.ready();
+```
+
+## Examples
+
+Examples can be found in the [examples](./examples) directory.
+To run the examples, clone the repository and run the following commands:
+
+```bash
+pnpm install
+pnpm run build
+```
+
+Then navigate to the `examples` directory and run the example you want to try.
+
+```bash
+node examples/express/index.js
 ```
 
 ## Contributing
