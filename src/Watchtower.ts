@@ -1,89 +1,120 @@
-import util from 'util';
 import { EventEmitter } from 'events';
 import { clearTimeout } from 'timers';
 
-import { Gauge } from 'prom-client';
-import type { Beacon, BeaconContext, BeaconController, BlockingTask, HealthCheckHandler, ShutdownHandler, WatchtowerConfiguration } from './types';
+import { Beacon, BlockingTask, HealthCheckHandler, ShutdownHandler, WatchtowerConfiguration } from './types';
 
-const log = util.debuglog('watchtower');
-
-const defaultConfiguration: Required<WatchtowerConfiguration> = {
-  shutdownDelay: -1,
+const defaultConfiguration: WatchtowerConfiguration = {
+  shutdownDelay: false,
   gracefulShutdownTimeoutPeriod: 30_000,
   shutdownHandlerTimeoutPeriod: 5_000,
   healthCheckTimeoutPeriod: 500,
-  signals: ['SIGTERM', 'SIGINT', 'SIGHUP'],
+  terminationSignals: ['SIGTERM', 'SIGINT', 'SIGHUP'],
 };
- 
-export class Watchtower {
-  public readonly startupDurationMetric = new Gauge({
-    name: 'watchtower_startup_duration_milliseconds',
-    help: 'Time between watchtower instance was created and it became ready for the first time',
+
+export class Watchtower extends EventEmitter {
+  private readonly configuration: WatchtowerConfiguration;
+
+  private _isReady = false;
+  private _isHealthy = false;
+  private _isShuttingDown = false;
+
+  private resolveReady!: () => void;
+  private rejectReady!: (reason?: Error) => void;
+  private readonly deferredReady = new Promise<void>((resolve, reject) => {
+    this.resolveReady = resolve;
+    this.rejectReady = reject;
   });
 
-  private readonly configuration: Required<WatchtowerConfiguration>;
-  private readonly eventEmitter = new EventEmitter();
   private readonly blockingTasks: BlockingTask[] = [];
   private readonly shutdownHandlers: ShutdownHandler[] = [];
   private readonly beacons: Beacon[] = [];
   private readonly healthCheckHandlers: HealthCheckHandler[] = [];
-  private resolveFirstReady!: (value: unknown) => void;
-  private rejectFirstReady!: (reason?: never) => void;
-  private readonly deferredFirstReady;
-  private _isServerShuttingDown = false;
-  private _isServerReady = false;
-  private _isServerHealthy = false;
-  private readonly startTime = process.hrtime();
-  private startupDuration?: [number, number];
 
-  constructor(userConfiguration?: WatchtowerConfiguration) {
+  constructor(userConfiguration?: Partial<WatchtowerConfiguration>) {
+    super();
+
     this.configuration = { ...defaultConfiguration, ...userConfiguration };
 
-    this.deferredFirstReady = new Promise((resolve, reject) => {
-      this.resolveFirstReady = resolve;
-      this.rejectFirstReady = reject;
-    });
-
-    this.deferredFirstReady
-      .then(() => {
-        // logger.info('service has become available for the first time');
-
-        this.startupDuration = process.hrtime(this.startTime);
-
-        this.startupDurationMetric.set(this.startupDuration[0] * 1000 + this.startupDuration[1] / 1000000);
-      })
-      .catch(async (/*err*/) => {
-        // logger.error(new Error("service couldn't become available", { cause: err }));
-        await this.shutdown();
-      });
-
     this.registerSignals();
+
+    this.deferredReady
+      .then(() => {
+        this._isReady = true;
+        this.emit('ready');
+        this.signalHealthy();
+      })
+      .catch(async (err) => {
+        this.emit('error', new Error('service couldn\'t become ready', { cause: err }));
+        this.terminate(1);
+      });
   }
 
-  isServerReady(): boolean {
-    if (this.blockingTasks.length > 0) {
+  isReady(): boolean {
+    return this._isReady;
+  }
+
+  async isHealthy(): Promise<boolean> {
+    if (!this.isReady() || this.isShuttingDown()) {
       return false;
     }
 
-    return this._isServerReady;
+    this._isHealthy = this._isHealthy && await this.areHealthCheckHandlersPassing();
+
+    return this._isHealthy && this.isReady() && !this.isShuttingDown();
   }
 
-  isServerShuttingDown(): boolean {
-    return this._isServerShuttingDown;
+  signalHealthy(): void {
+    if (!this.isReady() || this.isShuttingDown()) {
+      return;
+    }
+
+    this._isHealthy = true;
+
+    this.emit('healthStateChange', this._isHealthy);
   }
 
-  async isServerHealthy(): Promise<boolean> {
-    const handlersPassing = await this.areHealthCheckHandlersPassing();
-    this._isServerHealthy = this._isServerHealthy && handlersPassing;
+  signalUnhealthy(): void {
+    if (!this.isReady() || this.isShuttingDown()) {
+      return;
+    }
 
-    return this._isServerHealthy && this.isServerReady() && !this.isServerShuttingDown();
+    this._isHealthy = false;
+
+    this.emit('healthStateChange', this._isHealthy);
   }
 
-  registerShutdownHandler(shutdownHandler: ShutdownHandler): void {
-    this.shutdownHandlers.push(shutdownHandler);
+  isShuttingDown(): boolean {
+    return this._isShuttingDown;
+  }
+
+  /**
+   * Signals that the service is ready to accept traffic after all blocking tasks have been resolved.
+   *
+   * This method should be called after all blocking tasks have been queued.
+   *
+   * - If there are no blocking tasks, the service will become ready immediately.
+   * - If there are blocking tasks, the service will become ready after all of them have been resolved.
+   * - If the watchtower is already ready or shutting down, this method does nothing.
+   *
+   * After watchtower becomes ready for the first time, it will emit a 'ready' event.
+   */
+  async ready(): Promise<void> {
+    if (this.isReady() || this.isShuttingDown()) {
+      return;
+    }
+
+    if (this.blockingTasks.length <= 0) {
+      this.resolveReady();
+    }
+
+    return this.deferredReady;
   }
 
   queueBlockingTask(blockingTask: BlockingTask): void {
+    if (this.isReady()) {
+      throw new Error('cannot queue blocking task after the service has become ready');
+    }
+
     this.blockingTasks.push(blockingTask);
 
     blockingTask
@@ -91,177 +122,131 @@ export class Watchtower {
         const index = this.blockingTasks.indexOf(blockingTask);
         this.blockingTasks.splice(index, 1);
 
-        if (this.isServerReady()) {
-          this.resolveFirstReady(null);
+        if (!this.isReady() && this.blockingTasks.length <= 0) {
+          this.resolveReady();
         }
       })
       .catch((err) => {
-        // logger.error(new Error('startup task failed', { cause: err }));
-        this.rejectFirstReady(err);
+        const startupTaskError = new Error('startup task failed', { cause: err });
+        this.emit('error', startupTaskError);
+        this.rejectReady(startupTaskError);
       });
   }
 
-  createBeacon(context?: BeaconContext): BeaconController {
+  public async shutdown(reason?: string): Promise<void> {
+    await this.deferredReady;
+
+    if (this.configuration.shutdownDelay) {
+      // Adding delay to ensure all the proxies have done their job
+      // https://freecontent.manning.com/handling-client-requests-properly-with-kubernetes/
+      await new Promise((res) => setTimeout(res, this.configuration.shutdownDelayDuration));
+    }
+
+    if (this.isShuttingDown()) {
+      return;
+    }
+
+    this.signalUnhealthy();
+    this._isShuttingDown = true;
+
+    this.emit('shutdown', reason);
+
+    const gracefulShutdownTimeout = setTimeout(() => {
+      this.emit('error', new Error('graceful shutdown period ended, forcing process termination'));
+      this.terminate(1);
+    }, this.configuration.gracefulShutdownTimeoutPeriod).unref();
+
+    await this.awaitBeacons();
+    await this.runShutdownHandlers();
+
+    clearTimeout(gracefulShutdownTimeout);
+
+    this.emit('close');
+
+    // After that point process should exit on its own,
+    // in case something is keeping the event loop active
+    // we will forcefully terminate it after 1s
+    setTimeout(() => {
+      this.emit('error', new Error('process did not exit on its own, investigate what is keeping the event loop active'));
+      this.terminate(1);
+    }, 1_000).unref();
+  }
+
+  createBeacon(): Beacon {
+    if (this.isShuttingDown()) {
+      throw new Error('cannot create beacons after the shutdown has started');
+    }
+
     const beacon = {
-      context: context ?? {},
+      die: () => {
+        const index = this.beacons.indexOf(beacon);
+        this.beacons.splice(index, 1);
+
+        this.emit('beaconKilled', beacon);
+      }
     };
 
     this.beacons.push(beacon);
 
-    return {
-      die: async () => {
-        // logger.debug('beacon has been killed', { beacon });
-
-        const index = this.beacons.indexOf(beacon);
-        this.beacons.splice(index, 1);
-
-        this.eventEmitter.emit('beaconStateChange');
-
-        await new Promise((res) => setTimeout(res, 0));
-      },
-    };
+    return beacon;
   }
 
   registerHealthCheckHandler(healthCheckHandler: HealthCheckHandler): void {
     this.healthCheckHandlers.push(healthCheckHandler);
   }
 
-  signalReady(): void {
-    if (this.isServerShuttingDown()) {
-      return;
+  registerShutdownHandler(shutdownHandler: ShutdownHandler): void {
+    if (this.isShuttingDown()) {
+      throw new Error('cannot register shutdown handler after the shutdown has started');
     }
 
-    if (this.blockingTasks.length > 0) {
-      // logger.debug('service will not become immediately ready because there are blocking tasks queued');
-    }
-
-    this._isServerReady = true;
-    this.signalHealthy();
-
-    if (this.blockingTasks.length === 0) {
-      this.resolveFirstReady(null);
-    }
+    this.shutdownHandlers.push(shutdownHandler);
   }
 
-  signalHealthy(): void {
-    if (this.isServerShuttingDown()) {
-      return;
-    }
+  private async awaitBeacons(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const check = (): void => {
+        if (this.beacons.length <= 0) {
+          // No more live beacons, we can proceed with the shutdown
+          this.off('beaconKilled', check);
+          resolve();
+        }
+      };
 
-    this._isServerHealthy = true;
+      this.on('beaconKilled', check);
+
+      check();
+    });
   }
 
-  signalUnhealthy(): void {
-    if (this.isServerShuttingDown()) {
-      return;
-    }
-
-    this._isServerHealthy = false;
-  }
-
-  async shutdown(): Promise<void> {
-    if (this.isServerShuttingDown()) {
-      // logger.warn('service is already shutting down');
-      return;
-    }
-
-    // logger.info('received request to shutdown the service');
-    this._isServerShuttingDown = true;
-
-    // Adding delay to ensure all the proxies have done their job
-    // https://freecontent.manning.com/handling-client-requests-properly-with-kubernetes/
-    if (this.configuration.shutdownDelay >= 0) {
-      await new Promise((res) => setTimeout(res, this.configuration.shutdownDelay));
-    }
-
-    this._isServerHealthy = false;
-    this._isServerReady = false;
-
-    const gracefulShutdownTimeout = setTimeout(() => {
-      // logger.warn('graceful shutdown period ended, forcing process termination');
-      this.terminate(1);
-    }, this.configuration.gracefulShutdownTimeoutPeriod);
-
-    gracefulShutdownTimeout.unref();
-
-    if (this.beacons.length > 0) {
-      await new Promise<void>((resolve) => {
-        const check = (): void => {
-          // logger.verbose('checking if there are any live beacons');
-
-          if (this.beacons.length > 0) {
-            // logger.debug('program termination is on hold because there are live beacons', { beacons: this.beacons });
-          } else {
-            // logger.verbose('there aren\'t any live beacons left');
-
-            this.eventEmitter.off('beaconStateChange', check);
-
-            resolve();
-          }
-        };
-
-        this.eventEmitter.on('beaconStateChange', check);
-
-        check();
-      });
-    }
-
-    clearTimeout(gracefulShutdownTimeout);
-
+  private async runShutdownHandlers(): Promise<void> {
     const shutdownHandlerTimeout = setTimeout(() => {
-      // logger.warn('shutdown handler period ended, forcing process termination');
+      this.emit('error', new Error('shutdown handler period ended, forcing process termination'));
       this.terminate(1);
-    }, this.configuration.shutdownHandlerTimeoutPeriod);
-
-    shutdownHandlerTimeout.unref();
-
-    for (const shutdownHandler of this.shutdownHandlers) {
-      try {
-        await shutdownHandler();
-      } catch (err) {
-        // logger.error(new Error('shutdown handler produced an error', { cause: err }));
-      }
-    }
+    }, this.configuration.shutdownHandlerTimeoutPeriod).unref();
+    
+    await Promise.all(this.shutdownHandlers.map((handler) => handler()));
 
     clearTimeout(shutdownHandlerTimeout);
-
-    // logger.verbose('all shutdown handlers have run to completion');
-
-    setTimeout(() => {
-      // logger.warn('process did not exit on its own, investigate what is keeping the event loop active');
-
-      this.terminate(1);
-    }, 1_000).unref();
-
-    // logger.info('bye!');
   }
 
   private async areHealthCheckHandlersPassing(): Promise<boolean> {
     const healthCheckTimeout = setTimeout(() => {
-      // logger.warn('health check shutdown period ended, service deemed unhealthy');
+      this.emit('error', new Error('health check shutdown period ended, service deemed unhealthy'));
       return false;
-    }, this.configuration.healthCheckTimeoutPeriod);
+    }, this.configuration.healthCheckTimeoutPeriod).unref();
 
-    healthCheckTimeout.unref();
-
-    for (const healthCheckHandler of this.healthCheckHandlers) {
-      try {
-        await healthCheckHandler();
-      } catch (err) {
-        // logger.error(new Error('health check handler produced an error', { cause: err }));
-        return false;
-      }
-    }
+    const healthChecks = await Promise.all(this.healthCheckHandlers.map((handler) => handler()));
 
     clearTimeout(healthCheckTimeout);
 
-    return true;
+    return healthChecks.every((result) => result);
   }
 
   private registerSignals(): void {
-    for (const signal of this.configuration.signals) {
+    for (const signal of this.configuration.terminationSignals) {
       process.on(signal, () => {
-        void this.shutdown();
+        void this.shutdown(`process received ${signal} signal`);
       });
     }
   }
