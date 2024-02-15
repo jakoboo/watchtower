@@ -13,10 +13,10 @@ npm install @jakoboo/watchtower
 
 ## Features:
 
-- **Graceful Shutdowns:** Handle shutdowns gracefully with configurable timeout periods.
-- **Blocking Tasks:** Queue tasks to be executed on startup and ensure your application is ready.
-- **Beacons:** Create and manage beacons to prevent your application from closing.
-- **Health Check Handlers:** Implement health checks at multiple points in your code.
+- ✨ **Graceful Shutdowns:** Handle shutdowns gracefully with configurable timeout periods.
+- ⏳ **Blocking Tasks:** Queue tasks to be executed on startup and ensure your application is ready.
+- 🚦 **Beacons:** Create and manage beacons to prevent your application from closing.
+- ❤️‍🩹 **Health Check Handlers:** Implement health checks at multiple points in your code.
 
 ## To do:
 - [ ] Usage examples.
