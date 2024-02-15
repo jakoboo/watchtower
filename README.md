@@ -7,6 +7,8 @@
 
 Graceful shutdown library for Node.js applications.
 
+**This library is not production-ready yet, and the API is subject to change.**
+
 ```bash
 npm install @jakoboo/watchtower
 ```
