@@ -1,13 +1,13 @@
 import { EventEmitter } from 'events';
 import { clearTimeout } from 'timers';
 
-import { Beacon, BlockingTask, HealthCheckHandler, ShutdownHandler, WatchtowerConfiguration } from './types';
+import { Beacon, StartupTask, HealthCheckHandler, ShutdownTask, WatchtowerConfiguration } from './types';
 
 const defaultConfiguration: WatchtowerConfiguration = {
-  shutdownDelay: false,
-  gracefulShutdownTimeoutPeriod: 30_000,
-  shutdownHandlerTimeoutPeriod: 5_000,
-  healthCheckTimeoutPeriod: 500,
+  shutdownDelayMs: -1,
+  shutdownTimeoutMs: 10_000,
+  shutdownTasksTimeoutMs: -1,
+  healthCheckTimeoutMs: 1_000,
   terminationSignals: ['SIGTERM', 'SIGINT', 'SIGHUP'],
 };
 
@@ -25,8 +25,8 @@ export class Watchtower extends EventEmitter {
     this.rejectReady = reject;
   });
 
-  private readonly blockingTasks: BlockingTask[] = [];
-  private readonly shutdownHandlers: ShutdownHandler[] = [];
+  private readonly startupTasks: StartupTask[] = [];
+  private readonly shutdownTasks: ShutdownTask[] = [];
   private readonly beacons: Beacon[] = [];
   private readonly healthCheckHandlers: HealthCheckHandler[] = [];
 
@@ -88,12 +88,12 @@ export class Watchtower extends EventEmitter {
   }
 
   /**
-   * Signals that the service is ready to accept traffic after all blocking tasks have been resolved.
+   * Signals that the service is ready to accept traffic after all startup tasks have been resolved.
    *
-   * This method should be called after all blocking tasks have been queued.
+   * This method should be called after all startup tasks have been queued.
    *
-   * - If there are no blocking tasks, the service will become ready immediately.
-   * - If there are blocking tasks, the service will become ready after all of them have been resolved.
+   * - If there are no startup tasks, the service will become ready immediately.
+   * - If there are startup tasks, the service will become ready after all of them have been resolved.
    * - If the watchtower is already ready or shutting down, this method does nothing.
    *
    * After watchtower becomes ready for the first time, it will emit a 'ready' event.
@@ -103,26 +103,26 @@ export class Watchtower extends EventEmitter {
       return;
     }
 
-    if (this.blockingTasks.length <= 0) {
+    if (this.startupTasks.length <= 0) {
       this.resolveReady();
     }
 
     return this.deferredReady;
   }
 
-  queueBlockingTask(blockingTask: BlockingTask): void {
+  queueStartupTask(startupTask: StartupTask): void {
     if (this.isReady()) {
-      throw new Error('cannot queue blocking task after the service has become ready');
+      throw new Error('cannot queue startup task after the service has become ready');
     }
 
-    this.blockingTasks.push(blockingTask);
+    this.startupTasks.push(startupTask);
 
-    blockingTask
+    startupTask
       .then(() => {
-        const index = this.blockingTasks.indexOf(blockingTask);
-        this.blockingTasks.splice(index, 1);
+        const index = this.startupTasks.indexOf(startupTask);
+        this.startupTasks.splice(index, 1);
 
-        if (!this.isReady() && this.blockingTasks.length <= 0) {
+        if (!this.isReady() && this.startupTasks.length <= 0) {
           this.resolveReady();
         }
       })
@@ -136,10 +136,10 @@ export class Watchtower extends EventEmitter {
   public async shutdown(reason?: string): Promise<void> {
     await this.deferredReady;
 
-    if (this.configuration.shutdownDelay) {
+    if (this.configuration.shutdownDelayMs >= 0) {
       // Adding delay to ensure all the proxies have done their job
       // https://freecontent.manning.com/handling-client-requests-properly-with-kubernetes/
-      await new Promise((res) => setTimeout(res, this.configuration.shutdownDelayDuration));
+      await new Promise((res) => setTimeout(res, this.configuration.shutdownDelayMs));
     }
 
     if (this.isShuttingDown()) {
@@ -151,15 +151,20 @@ export class Watchtower extends EventEmitter {
 
     this.emit('shutdown', reason);
 
-    const gracefulShutdownTimeout = setTimeout(() => {
-      this.emit('error', new Error('graceful shutdown period ended, forcing process termination'));
-      this.terminate(1);
-    }, this.configuration.gracefulShutdownTimeoutPeriod).unref();
+    let gracefulShutdownTimeout;
+    if (this.configuration.shutdownTimeoutMs >= 0) {
+      gracefulShutdownTimeout = setTimeout(() => {
+        this.emit('error', new Error('graceful shutdown period ended, forcing process termination'));
+        this.terminate(1);
+      }, this.configuration.shutdownTimeoutMs).unref();
+    }
 
     await this.awaitBeacons();
-    await this.runShutdownHandlers();
+    await this.executeShutdownTasks();
 
-    clearTimeout(gracefulShutdownTimeout);
+    if (gracefulShutdownTimeout) {
+      clearTimeout(gracefulShutdownTimeout);
+    }
 
     this.emit('close');
 
@@ -195,12 +200,12 @@ export class Watchtower extends EventEmitter {
     this.healthCheckHandlers.push(healthCheckHandler);
   }
 
-  registerShutdownHandler(shutdownHandler: ShutdownHandler): void {
+  registerShutdownTask(shutdownTask: ShutdownTask): void {
     if (this.isShuttingDown()) {
-      throw new Error('cannot register shutdown handler after the shutdown has started');
+      throw new Error('cannot register shutdown task after the shutdown has started');
     }
 
-    this.shutdownHandlers.push(shutdownHandler);
+    this.shutdownTasks.push(shutdownTask);
   }
 
   private async awaitBeacons(): Promise<void> {
@@ -219,26 +224,36 @@ export class Watchtower extends EventEmitter {
     });
   }
 
-  private async runShutdownHandlers(): Promise<void> {
-    const shutdownHandlerTimeout = setTimeout(() => {
-      this.emit('error', new Error('shutdown handler period ended, forcing process termination'));
-      this.terminate(1);
-    }, this.configuration.shutdownHandlerTimeoutPeriod).unref();
+  private async executeShutdownTasks(): Promise<void> {
+    let shutdownTasksTimeout;
+    if (this.configuration.shutdownTasksTimeoutMs >= 0) {
+      shutdownTasksTimeout = setTimeout(() => {
+        this.emit('error', new Error('shutdown tasks timeout, forcing process termination'));
+        this.terminate(1);
+      }, this.configuration.shutdownTasksTimeoutMs).unref();
+    }
     
-    await Promise.all(this.shutdownHandlers.map((handler) => handler()));
+    await Promise.all(this.shutdownTasks.map((task) => task()));
 
-    clearTimeout(shutdownHandlerTimeout);
+    if (shutdownTasksTimeout) {
+      clearTimeout(shutdownTasksTimeout);
+    }
   }
 
   private async areHealthCheckHandlersPassing(): Promise<boolean> {
-    const healthCheckTimeout = setTimeout(() => {
-      this.emit('error', new Error('health check shutdown period ended, service deemed unhealthy'));
-      return false;
-    }, this.configuration.healthCheckTimeoutPeriod).unref();
+    let healthCheckTimeout;
+    if (this.configuration.healthCheckTimeoutMs >= 0) {
+      healthCheckTimeout = setTimeout(() => {
+        this.emit('error', new Error('health check timeout, service deemed unhealthy'));
+        return false;
+      }, this.configuration.healthCheckTimeoutMs).unref();
+    }
 
     const healthChecks = await Promise.all(this.healthCheckHandlers.map((handler) => handler()));
 
-    clearTimeout(healthCheckTimeout);
+    if (healthCheckTimeout) {
+      clearTimeout(healthCheckTimeout);
+    }
 
     return healthChecks.every((result) => result);
   }

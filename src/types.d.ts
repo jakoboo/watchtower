@@ -1,40 +1,33 @@
 export interface WatchtowerConfiguration {
     /**
-     * Enable delay before the shutdown sequence starts.
+     * Delay in ms before the shutdown sequence starts.
      *
-     * @defaultValue false
-     *
-     * @see shutdownDelayDuration
-     */
-    shutdownDelay: boolean;
-
-    /**
-     * Delay before the shutdown sequence starts.
+     * @defaultValue -1 (disabled)
      *
      * @see https://freecontent.manning.com/handling-client-requests-properly-with-kubernetes/
      */
-    shutdownDelayDuration?: number;
+    shutdownDelayMs: number;
 
     /**
-     * Max total time before process is killed (if graceful shutdown fails).
+     * Max total shutdown time before process is killed.
      *
-     * @defaultValue 30000
+     * @defaultValue 10000 (10s)
      */
-    gracefulShutdownTimeoutPeriod: number;
+    shutdownTimeoutMs: number;
 
     /**
-     * Timeout period for shutdown handlers.
+     * Timeout period for shutdown tasks.
      *
-     * @defaultValue 5000
+     * @defaultValue -1 (disabled)
      */
-    shutdownHandlerTimeoutPeriod: number;
+    shutdownTasksTimeoutMs: number;
 
     /**
      * Timeout period for health check.
      *
-     * @defaultValue 500
+     * @defaultValue 1000 (1s)
      */
-    healthCheckTimeoutPeriod: number;
+    healthCheckTimeoutMs: number;
 
     /**
      * List of signals that should trigger graceful shutdown of the server.
@@ -52,11 +45,11 @@ export interface WatchtowerConfiguration {
     terminationSignals: readonly string[];
 }
 
-export type BlockingTask = Promise<never>;
+export type StartupTask = Promise<never>;
 export type HealthCheckHandler = () => Promise<boolean> | boolean;
 
 export interface Beacon {
     die: () => void;
 }
 
-export type ShutdownHandler = () => Promise<void> | void
+export type ShutdownTask = () => Promise<void> | void

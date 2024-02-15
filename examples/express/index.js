@@ -33,8 +33,8 @@ app.get('/health', async (req, res) => {
 // We have to create our own server as express instance doesn't hold a reference to the server
 const expressServer = createServer(app);
 
-// Queue server start up as a blocking task so that watchtower knows when it can become ready
-watchtower.queueBlockingTask(new Promise((resolve, reject) => {
+// Queue server start up as a startup task so that watchtower knows when it can become ready
+watchtower.queueStartupTask(new Promise((resolve, reject) => {
   expressServer
     .listen(8080, () => {
       console.log('server started at port: 8080');
@@ -46,16 +46,16 @@ watchtower.queueBlockingTask(new Promise((resolve, reject) => {
     });
 }));
 
-// Queue a blocking task to simulate a long running task
-watchtower.queueBlockingTask(new Promise((resolve) => {
+// Queue a startup task to simulate a long running task
+watchtower.queueStartupTask(new Promise((resolve) => {
   setTimeout(() => {
-    console.log('Long running blocking task is done');
+    console.log('Long running startup task is done');
     resolve();
   }, 5_000);
 }));
 
 // Gracefully shutdown the http server
-watchtower.registerShutdownHandler(async () => {
+watchtower.registerShutdownTask(async () => {
   await new Promise((resolve, reject) => {
     let connectionsTimeout;
 
@@ -79,10 +79,9 @@ watchtower.registerShutdownHandler(async () => {
     // Close all connections after a timeout
     connectionsTimeout = setTimeout(() => {
       expressServer.closeAllConnections();
-    }, 1000);
-    connectionsTimeout.unref();
+    }, 1000).unref();
   });
 });
 
-// Signal watchtower that we are done, and it can become ready whenever queue blocking tasks are resolved.
+// Signal watchtower that we are done, and it can become ready whenever queued startup tasks are resolved.
 void watchtower.ready();

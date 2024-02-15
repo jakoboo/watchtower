@@ -14,7 +14,8 @@ npm install @jakoboo/watchtower
 ## Features:
 
 - ✨ **Graceful Shutdowns:** Handle shutdowns gracefully with configurable timeout periods.
-- ⏳ **Blocking Tasks:** Queue tasks to be executed on startup and ensure your application is ready.
+- ⏳ **Startup Tasks:** Queue tasks to be executed on startup and ensure your application is ready.
+- ☠️ **Shutdown Tasks:** Queue tasks to be executed on shutdown, close connections, release resources, etc.
 - 🚦 **Beacons:** Create and manage beacons to prevent your application from closing.
 - ❤️‍🩹 **Health Check Handlers:** Implement health checks at multiple points in your code.
 
@@ -29,22 +30,22 @@ const watchtower = new Watchtower();
 
 // Your application's startup code.
 
-// Register a blocking task that will be executed before the application is ready.
-watchtower.registerBlockingTask(/* promise to be awaited */);
+// Queue a startup task that will be executed before the application is ready.
+watchtower.queueStartupTask(/* promise to be awaited */);
 
-// Register a shutdown handler that will be called when the application is shutting down.
-watchtower.registerShutdownHandler(async () => {
+// Register a shutdown task that will be executed when the application is shutting down.
+watchtower.registerShutdownTask(async () => {
   // Your application's shutdown code.
   // For example, close database connections, release resources, etc.
 });
 
-// Signal watchtower that we are done, and it can become ready whenever queue blocking tasks are resolved.
+// Signal watchtower that we are done, and it can become ready whenever queued startup tasks are resolved.
 watchtower.ready();
 ```
 
 ### Express.js Graceful Shutdown
 
-Gracefully shutdown of an express server requires us to register a shutdown handler that closes the server and waits for all connections to be closed before resolving the promise.
+Gracefully shutdown of an express server requires us to register a shutdown task that closes the server and waits for all connections to be closed before resolving the promise.
 For a complete example, see the [express example](./examples/express) directory.
 
 ```javascript
@@ -60,7 +61,7 @@ const app = express();
 const expressServer = createServer(app);
 
 // Gracefully shutdown the http server
-watchtower.registerShutdownHandler(async () => {
+watchtower.registerShutdownTask(async () => {
     await new Promise((resolve, reject) => {
         let connectionsTimeout;
 
@@ -91,7 +92,7 @@ watchtower.registerShutdownHandler(async () => {
 
 [...]
 
-// Signal watchtower that we are done, and it can become ready whenever queue blocking tasks are resolved.
+// Signal watchtower that we are done, and it can become ready whenever queued startup tasks are resolved.
 void watchtower.ready();
 ```
 
